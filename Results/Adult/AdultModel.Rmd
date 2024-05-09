@@ -1,0 +1,311 @@
+---
+title: "Adult Dataset"
+author: "Jianhui Gao"
+date: "2023-07-25"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(kableExtra)
+library(matrixStats)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+
+# Description
+
+The total number of rows are 45,222. I am randomly selecting 1,400 rows as labeled data. 700 are allocated to the training, and 700 are reserved for testing. I used lasso for model building. I repeated the sampling of labeled data 10,000 times and averaged the results. 
+
+```{r}
+dat <- data.table::fread("Data/Adult/adult.data",
+  na.strings = "?"
+)
+test <- data.table::fread("Data/Adult/adult.test",
+  na.strings = "?"
+)
+test$V15 <- test$V15 %>% gsub("\\.", "", .)
+
+dat <- rbind(dat, test)
+
+colnames(dat) <- c(
+  "age", "workclass", "fnlwgt", "education",
+  "education_num", "marital_status", "occupation",
+  "relationship", "race", "sex", "capital_gain",
+  "capital_loss", "hours_per_week", "native_country",
+  "income_per_year"
+)
+
+dat <- dat %>% drop_na()
+```
+
+# Results
+
+```{r}
+getwd()
+results <- readRDS("RealDataAnalysis/adult/adult_logistic_sex_n=1000.rds")
+oracle_est <- do.call(rbind, lapply(results, function(ll) ll$oracle_est))  %>% group_by(Metric) %>% summarise_all(function(x) mean(x, na.rm = TRUE)) %>% pivot_longer(
+  cols = -c(Metric),
+  names_to = "Group",
+  values_to = "Est"
+)
+oracle_var <- do.call(rbind, lapply(results, function(ll) ll$oracle_var)) %>% group_by(Metric) %>% summarise_all(function(x) mean(x, na.rm = TRUE)) %>% pivot_longer(
+  cols = -c(Metric),
+  names_to = "Group",
+  values_to = "Var"
+)
+oracle <- oracle_est %>% left_join(oracle_var, by = c("Metric", "Group")) %>% mutate(Method = "Oracle")
+sup_est <- do.call(rbind, lapply(results, function(ll) ll$sup_est)) %>% group_by(Metric) %>% summarise_all(function(x) mean(x, na.rm = TRUE)) %>% pivot_longer(
+  cols = -c(Metric),
+  names_to = "Group",
+  values_to = "Est"
+)
+sup_var <- do.call(rbind, lapply(results, function(ll) ll$sup_var)) %>% group_by(Metric) %>% summarise_all(function(x) mean(x, na.rm = TRUE)) %>% pivot_longer(
+  cols = -c(Metric),
+  names_to = "Group",
+  values_to = "Var"
+)
+sup <- sup_est %>% left_join(sup_var, by = c("Metric", "Group")) %>% mutate(Method = "Supervised")
+ss_est <- do.call(rbind, lapply(results, function(ll) ll$inf_est)) %>% group_by(Metric) %>% summarise_all(function(x) mean(x, na.rm = TRUE)) %>% pivot_longer(
+  cols = -c(Metric),
+  names_to = "Group",
+  values_to = "Est"
+)
+ss_var <- do.call(rbind, lapply(results, function(ll) ll$inf_var)) %>% group_by(Metric) %>% summarise_all(function(x) mean(x, na.rm = TRUE)) %>% pivot_longer(
+  cols = -c(Metric),
+  names_to = "Group",
+  values_to = "Var"
+)
+ss <- ss_est %>% left_join(ss_var, by = c("Metric", "Group")) %>% mutate(Method = "Infairness")
+```
+
+
+```{r}
+rbind(oracle, sup, ss) %>% 
+  filter(!Metric %in% c("mu", "F1", "FNR", "FPR", "NPV", "PPV")) %>%
+  mutate(Method = factor(Method, levels = c("Oracle", "Supervised", "Infairness"))) %>%
+  mutate(Group = factor(Group, levels = c("GroupFemale", "GroupMale", "Delta"), labels = c("Female", "Male", "Delta"))) %>%
+  ggplot(aes(x = Metric, y = Est, fill = Method)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_errorbar(aes(ymin = Est - 1.96* sqrt(Var), ymax = Est + 1.9*sqrt(Var)), position = position_dodge(width = 0.9), width = 0.25) +
+  facet_wrap(~Group, ncol = 3) +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 45, hjust = 1))+
+  xlab("") +
+  ylab("Estimated Value") +
+  ggsci::scale_fill_nejm()
+ggsave("RealDataAnalysis/adult/adult_logistic.png", width = 6, height = 4, units = "in")
+```
+
+```{r}
+sup <- cbind(sup[,1:2], bias = sup$Est - oracle$Est) %>%
+  left_join(sup, by = c("Metric", "Group")) %>%
+  mutate(MSE = bias^2 + Var)
+ss <- cbind(ss[,1:2], bias = ss$Est - oracle$Est) %>%
+  left_join(ss, by = c("Metric", "Group")) %>%
+  mutate(MSE = bias^2 + Var)
+re <- cbind(sup[,1:2], re = sup$MSE/ss$MSE, method = "Infairness")
+
+re  %>% 
+  filter(!Metric %in% c("mu", "F1", "FNR", "FPR", "NPV", "PPV")) %>%
+  mutate(Group = factor(Group, levels = c("GroupFemale", "GroupMale", "Delta"), labels = c("Female", "Male", "Delta"))) %>% ggplot(aes(x = Metric, y = re, fill = Group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    theme_bw() +
+    theme(legend.position = "bottom") +
+    geom_abline(intercept = 1, slope = 0, linetype = "dashed") +
+    ylab("Relative Efficiency \n (Supervised:Infairness)") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    xlab("")+
+    ggsci::scale_fill_lancet()+
+    ylim(0, 2)
+ggsave("RealDataAnalysis/adult/re_adult_logistic.png", width = 6, height = 4, units = "in")
+```
+
+
+
+
+\clearpage
+
+# Oracle Point Estimate
+
+```{r}
+oracle_est <- lapply(results, function(ll) ll[["oracle"]])
+oracle_est <- do.call(rbind, lapply(1:6, function(i) {
+  colMeans(do.call(rbind, lapply(oracle_est[!is.na(oracle_est)], function(ll) ll[i, ])))
+}))
+oracle_est %>%
+  data.frame() %>%
+  mutate_all(function(x) round(x * 100, 2)) %>%
+  kable(
+    booktabs = TRUE,
+    caption = "Mean Oracle Est * 100"
+  ) %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+
+# RE (MSE)
+
+```{r}
+sup_est <- lapply(results, function(ll) ll[["sup"]])
+sup_var <- do.call(rbind, lapply(1:6, function(i) {
+  colVars(do.call(rbind, lapply(sup_est, function(ll) ll[i, ])) %>%
+            as.matrix(), na.rm = TRUE)
+}))
+
+# Cubic Variance
+cubic_est <- lapply(results, function(ll) ll[["cubic"]])
+cubic_var <- do.call(rbind, lapply(1:6, function(i) {
+  colVars(do.call(rbind, lapply(cubic_est, function(ll) 
+    if(length(ll) > 1) {ll[i, ]})) %>%
+      as.matrix(), na.rm = TRUE)
+}))
+cubic_re <- (sup_bias^2 + sup_var)/(cubic_bias^2 + cubic_var)
+
+quad_est <- lapply(results, function(ll) ll[["quad"]])
+quad_var <- do.call(rbind, lapply(1:6, function(i) {
+  colVars(do.call(rbind, lapply(quad_est, function(ll) 
+    if(length(ll) > 1) {ll[i, ]})) %>%
+      as.matrix())
+}))
+quad_re <- (sup_bias^2 + sup_var)/(quad_bias^2 + quad_var)
+
+platt_est <- lapply(results, function(ll) ll[["platt"]])
+platt_var <- do.call(rbind, lapply(1:6, function(i) {
+  colVars(do.call(rbind, lapply(platt_est, function(ll) 
+    if(length(ll) > 1) {ll[i, ]})) %>%
+      as.matrix())
+}))
+platt_re <- (sup_bias^2 + sup_var)/(platt_bias^2 + platt_var)
+
+beta_est <- lapply(results, function(ll) ll[["beta"]])
+beta_var <- do.call(rbind, lapply(1:6, function(i) {
+  colVars(do.call(rbind, lapply(beta_est, function(ll) 
+    if(length(ll) > 1) {ll[i, ]})) %>%
+      as.matrix())
+}))
+beta_re <- (sup_bias^2 + sup_var)/(beta_bias^2 + beta_var)
+
+
+
+ks_est <- lapply(results, function(ll) ll[["ks"]])
+ks_var <- do.call(rbind, lapply(1:6, function(i) {
+  colVars(do.call(rbind, lapply(ks_est, function(ll) 
+    if(length(ll) > 1) {ll[i, ]})) %>%
+      as.matrix())
+}))
+ks_re <- (sup_bias^2 + sup_var)/(ks_bias^2 + ks_var)
+```
+
+
+```{r}
+rbind(cubic_re, quad_re, platt_re, beta_re, ks_re)  %>%
+  data.frame() %>%
+  mutate(Metric = rep(row_names, 5)) %>%
+  select(Metric, GroupFemale, GroupMale, Delta) %>% 
+  kbl(booktabs = TRUE, digits = 2, align = 'c',
+      caption = "Mean RE across 10,000 simulations") %>%
+  pack_rows("Cubic Spline", 1, 6) %>%
+  pack_rows("Quadratic Polynomial", 7, 12) %>%
+  pack_rows("Platt", 13, 18) %>%
+  pack_rows("Beta", 19, 24) %>%
+  pack_rows("Kernel Smoothing", 25, 30) %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+# Check Distribution
+
+# TPR 
+
+```{r}
+par(mfrow = c(2, 3))
+index <- 1
+metric <- "TPR"
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
+
+```
+
+
+
+# FPR 
+
+```{r}
+par(mfrow = c(2, 3))
+index <- 2
+metric <- "FPR"
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
+
+```
+
+
+# NPV 
+
+```{r}
+par(mfrow = c(2, 3))
+index <- 3
+metric <- "NPV"
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
+
+```
+
+# PPV
+
+```{r}
+par(mfrow = c(2, 3))
+index <- 4
+metric <- "PPV"
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
+
+```
+
+# ACC
+
+```{r}
+par(mfrow = c(2, 3))
+index <- 5
+metric <- "ACC"
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
+
+```
+
+# F1
+
+```{r}
+par(mfrow = c(2, 3))
+index <- 6
+metric <- "F1"
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
+hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
+hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
+hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
+
+```
