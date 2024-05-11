@@ -44,7 +44,7 @@ dat <- dat %>% drop_na()
 
 ```{r}
 getwd()
-results <- readRDS("RealDataAnalysis/adult/adult_logistic_sex_n=1000.rds")
+results <- readRDS("Results/Adult/adult_logistic_sex_n=1000.rds")
 oracle_est <- do.call(rbind, lapply(results, function(ll) ll$oracle_est))  %>% group_by(Metric) %>% summarise_all(function(x) mean(x, na.rm = TRUE)) %>% pivot_longer(
   cols = -c(Metric),
   names_to = "Group",
@@ -96,7 +96,7 @@ rbind(oracle, sup, ss) %>%
   xlab("") +
   ylab("Estimated Value") +
   ggsci::scale_fill_nejm()
-ggsave("RealDataAnalysis/adult/adult_logistic.png", width = 6, height = 4, units = "in")
+ggsave("Results/Adult/adult_logistic.png", width = 6, height = 4, units = "in")
 ```
 
 ```{r}
@@ -120,7 +120,7 @@ re  %>%
     xlab("")+
     ggsci::scale_fill_lancet()+
     ylim(0, 2)
-ggsave("RealDataAnalysis/adult/re_adult_logistic.png", width = 6, height = 4, units = "in")
+ggsave("Results/Adult/re_adult_logistic.png", width = 6, height = 4, units = "in")
 ```
 
 
@@ -128,184 +128,3 @@ ggsave("RealDataAnalysis/adult/re_adult_logistic.png", width = 6, height = 4, un
 
 \clearpage
 
-# Oracle Point Estimate
-
-```{r}
-oracle_est <- lapply(results, function(ll) ll[["oracle"]])
-oracle_est <- do.call(rbind, lapply(1:6, function(i) {
-  colMeans(do.call(rbind, lapply(oracle_est[!is.na(oracle_est)], function(ll) ll[i, ])))
-}))
-oracle_est %>%
-  data.frame() %>%
-  mutate_all(function(x) round(x * 100, 2)) %>%
-  kable(
-    booktabs = TRUE,
-    caption = "Mean Oracle Est * 100"
-  ) %>%
-  kable_styling(latex_options = "HOLD_position")
-```
-
-
-# RE (MSE)
-
-```{r}
-sup_est <- lapply(results, function(ll) ll[["sup"]])
-sup_var <- do.call(rbind, lapply(1:6, function(i) {
-  colVars(do.call(rbind, lapply(sup_est, function(ll) ll[i, ])) %>%
-            as.matrix(), na.rm = TRUE)
-}))
-
-# Cubic Variance
-cubic_est <- lapply(results, function(ll) ll[["cubic"]])
-cubic_var <- do.call(rbind, lapply(1:6, function(i) {
-  colVars(do.call(rbind, lapply(cubic_est, function(ll) 
-    if(length(ll) > 1) {ll[i, ]})) %>%
-      as.matrix(), na.rm = TRUE)
-}))
-cubic_re <- (sup_bias^2 + sup_var)/(cubic_bias^2 + cubic_var)
-
-quad_est <- lapply(results, function(ll) ll[["quad"]])
-quad_var <- do.call(rbind, lapply(1:6, function(i) {
-  colVars(do.call(rbind, lapply(quad_est, function(ll) 
-    if(length(ll) > 1) {ll[i, ]})) %>%
-      as.matrix())
-}))
-quad_re <- (sup_bias^2 + sup_var)/(quad_bias^2 + quad_var)
-
-platt_est <- lapply(results, function(ll) ll[["platt"]])
-platt_var <- do.call(rbind, lapply(1:6, function(i) {
-  colVars(do.call(rbind, lapply(platt_est, function(ll) 
-    if(length(ll) > 1) {ll[i, ]})) %>%
-      as.matrix())
-}))
-platt_re <- (sup_bias^2 + sup_var)/(platt_bias^2 + platt_var)
-
-beta_est <- lapply(results, function(ll) ll[["beta"]])
-beta_var <- do.call(rbind, lapply(1:6, function(i) {
-  colVars(do.call(rbind, lapply(beta_est, function(ll) 
-    if(length(ll) > 1) {ll[i, ]})) %>%
-      as.matrix())
-}))
-beta_re <- (sup_bias^2 + sup_var)/(beta_bias^2 + beta_var)
-
-
-
-ks_est <- lapply(results, function(ll) ll[["ks"]])
-ks_var <- do.call(rbind, lapply(1:6, function(i) {
-  colVars(do.call(rbind, lapply(ks_est, function(ll) 
-    if(length(ll) > 1) {ll[i, ]})) %>%
-      as.matrix())
-}))
-ks_re <- (sup_bias^2 + sup_var)/(ks_bias^2 + ks_var)
-```
-
-
-```{r}
-rbind(cubic_re, quad_re, platt_re, beta_re, ks_re)  %>%
-  data.frame() %>%
-  mutate(Metric = rep(row_names, 5)) %>%
-  select(Metric, GroupFemale, GroupMale, Delta) %>% 
-  kbl(booktabs = TRUE, digits = 2, align = 'c',
-      caption = "Mean RE across 10,000 simulations") %>%
-  pack_rows("Cubic Spline", 1, 6) %>%
-  pack_rows("Quadratic Polynomial", 7, 12) %>%
-  pack_rows("Platt", 13, 18) %>%
-  pack_rows("Beta", 19, 24) %>%
-  pack_rows("Kernel Smoothing", 25, 30) %>%
-  kable_styling(latex_options = "HOLD_position")
-```
-
-# Check Distribution
-
-# TPR 
-
-```{r}
-par(mfrow = c(2, 3))
-index <- 1
-metric <- "TPR"
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
-
-```
-
-
-
-# FPR 
-
-```{r}
-par(mfrow = c(2, 3))
-index <- 2
-metric <- "FPR"
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
-
-```
-
-
-# NPV 
-
-```{r}
-par(mfrow = c(2, 3))
-index <- 3
-metric <- "NPV"
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
-
-```
-
-# PPV
-
-```{r}
-par(mfrow = c(2, 3))
-index <- 4
-metric <- "PPV"
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
-
-```
-
-# ACC
-
-```{r}
-par(mfrow = c(2, 3))
-index <- 5
-metric <- "ACC"
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
-
-```
-
-# F1
-
-```{r}
-par(mfrow = c(2, 3))
-index <- 6
-metric <- "F1"
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 1])), xlab = metric, main = "Supervised; Female")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 1])), xlab = metric, main = "Cubic Spline; Female")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 1])), xlab = metric, main = "Kernel Smoothing; Female")
-hist(do.call(rbind, lapply(sup_est, function(ll) ll[index, 2])), xlab = metric, main = "Supervised; Male")
-hist(do.call(rbind, lapply(cubic_est, function(ll) ll[index, 2])), xlab = metric, main = "Cubic Spline; Male")
-hist(do.call(rbind, lapply(ks_est, function(ll) ll[index, 2])), xlab = metric, main = "Kernel Smoothing; Male")
-
-```
