@@ -618,15 +618,11 @@ ggpubr::ggarrange(plotlist = dist_list)
 
 ```
 
-# Relative Efficiency
+
+
 
 
 ```{r}
-pest_list_main <- list()
-pest_list_supp <- list()
-re_list <- list()
-re_emp_list <- list()
-cp_list <- list()
 files <- list.files("Results/Simulation/", full.names = TRUE, pattern = "^unbalanced")
 for (i in files){
   results <- readRDS(i)
@@ -705,23 +701,9 @@ beta_var <- do.call(rbind, lapply(results, function(ll) ll$beta_var)) %>% group_
 )
 beta <- beta_est %>% left_join(beta_var, by = c("Metric", "Group")) %>% mutate(Method = "Beta Calibration")
 
-# ss_nobasis_est <- do.call(rbind, lapply(results, function(ll) ll$ss_nobasis_est)) %>% group_by(Metric) %>% summarise_all(function(x) mean(x, na.rm = TRUE)) %>% pivot_longer(
-#   cols = -c(Metric),
-#   names_to = "Group",
-#   values_to = "Est"
-# )
-# 
-# ss_nobasis_var <- do.call(rbind, lapply(results, function(ll) ll$ss_nobasis_var)) %>% group_by(Metric) %>% summarise_all(function(x) mean(x, na.rm = TRUE)) %>% pivot_longer(
-#   cols = -c(Metric),
-#   names_to = "Group",
-#   values_to = "Var"
-# )
-# 
-# ss_nobasis <- ss_nobasis_est %>% left_join(ss_nobasis_var, by = c("Metric", "Group")) %>% mutate(Method = "Infairness_no_basis")
-
-rbind(oracle, sup, ss, naive, platt, beta) %>% 
+rbind(oracle, sup, ss) %>% 
   filter(!Metric %in% c("FNR", "FPR")) %>%
-  mutate(Method = factor(Method, levels = c("Oracle", "Supervised", "Infairness", "Naive", "Platt Scaling", "Beta Calibration"))) %>%
+  mutate(Method = factor(Method, levels = c("Oracle", "Supervised", "Infairness"))) %>%
   mutate(Group = factor(Group, levels = c("Group0", "Group1", "Delta"))) %>%
   ggplot(aes(x = Metric, y = Est, fill = Method)) +
   geom_bar(stat = "identity", position = "dodge") +
@@ -734,23 +716,6 @@ rbind(oracle, sup, ss, naive, platt, beta) %>%
   ylab("Estimated Value") +
   ggsci::scale_fill_nejm()
 ggsave(paste0("Results/Simulation/pest_supp_",sub(".*_(.*)\\.rds", "\\1", i), ".png"), width = 6, height = 3, dpi = 360, units = "in", device = "png")
-
-
-
-pest_list_supp[[length(pest_list_supp) + 1]] <- rbind(oracle, sup, ss, naive, platt, beta) %>% 
-  filter(!Metric == "mu") %>%
-  mutate(Method = factor(Method, levels = c("Oracle", "Supervised", "Naive", "Platt Scaling", "Beta Calibration", "Infairness"))) %>%
-  mutate(Group = factor(Group, levels = c("Group0", "Group1", "Delta"))) %>%
-  ggplot(aes(x = Metric, y = Est, fill = Method)) +
-  geom_bar(stat = "identity", position = "dodge") +
-  geom_errorbar(aes(ymin = Est - 1.96* sqrt(Var), ymax = Est + 1.9*sqrt(Var)), position = position_dodge(width = 0.9), width = 0.25) +
-  facet_wrap(~Group, ncol = 1) +
-  theme_bw() +
-  theme(legend.position = "bottom",
-        axis.text.x = element_text(angle = 45, hjust = 1))+
-  ggtitle(sub(".*_(.*)\\.rds", "\\1", i))+
-  ggsci::scale_fill_nejm()
-
 
 
 sup <- cbind(sup[,1:2], bias = sup$Est - oracle$Est) %>%
@@ -769,17 +734,7 @@ beta <- cbind(beta[,1:2], bias = beta$Est - oracle$Est) %>%
   left_join(beta, by = c("Metric", "Group")) %>%
   mutate(MSE = bias^2 + Var)
 
-#ss_nobasis <- cbind(ss_nobasis[,1:2], bias = ss_nobasis$Est - oracle$Est) %>%
-#  left_join(ss_nobasis, by = c("Metric", "Group")) %>%
-#  mutate(MSE = bias^2 + Var)
-
 re <- cbind(sup[,1:2], re = sup$MSE/ss$MSE, method = "Infairness")
-#re <- rbind(re, cbind(naive[,1:2], re = sup$MSE/naive$MSE, method = "Naive"))
-#re <- rbind(re, cbind(platt[,1:2], re = sup$MSE/platt$MSE, method = "Platt Scaling"))
-#re <- rbind(re, cbind(beta[,1:2], re = sup$MSE/beta$MSE, method = "Beta Calibration"))
-
-#re <- rbind(re, cbind(ss_nobasis[,1:2], re = sup$MSE/ss_nobasis$MSE, method = "No basis"))
-
 
 re  %>% 
   filter(!Metric %in% c("FNR", "FPR")) %>%
@@ -810,16 +765,6 @@ ss <- do.call(rbind, lapply(results, function(ll) ll$ss_est)) %>% group_by(Metri
 
 re <- cbind(sup[,1:2], re = sup$EMSE/ss$EMSE)
 
-re_emp_list[[length(re_emp_list)+1]] <- re %>% ggplot(aes(x = Metric, y = re, fill = Group)) +
-  geom_bar(stat = "identity", position = "dodge") +
-  theme_bw() +
-  theme(legend.position = "bottom") +
-  geom_abline(intercept = 1, slope = 0, linetype = "dashed") +
-  geom_text(aes(label = round(re, 1)), position = position_dodge(width = 0.9), vjust = -0.5) + 
-  ylab("RE") +
-  ggtitle(sub(".*_(.*)\\.rds", "\\1", i))+
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
 sup_est <- do.call(rbind, lapply(results, function(ll) ll$sup_est))
 sup_var <- do.call(rbind, lapply(results, function(ll) ll$sup_var))
 sup_delta_ci <- data.frame(Metric = sup_est[,1], L = sup_est$Delta - 1.96*sqrt(sup_var$Delta), U = sup_est$Delta + 1.96*sqrt(sup_var$Delta))
@@ -845,37 +790,26 @@ ss_1_ci <- ss_1_ci %>% left_join(oracle_1, by = "Metric") %>% mutate(Coverage = 
 ss_2_ci <- data.frame(Metric = ss_est[,1], L = ss_est$Group0 - 1.96*sqrt(ss_var$Group0), U = ss_est$Group0 + 1.96*sqrt(ss_var$Group0))
 ss_2_ci <- ss_2_ci %>% left_join(oracle_2, by = "Metric") %>% mutate(Coverage = ifelse(L <= Est & U >= Est, 1, 0)) %>% group_by(Metric) %>% summarise(Coverage = mean(Coverage, na.rm = TRUE)) %>% mutate(Group = "Group0")
 
-cp_list[[length(cp_list)+1]] <- rbind(cbind(rbind(sup_1_ci, sup_2_ci, sup_delta_ci), method = "Supervised"),
-      cbind(rbind(ss_1_ci, ss_2_ci, ss_delta_ci), method = "Infairness")) %>% ggplot(aes(x = Metric, y = Coverage, fill = method)) +
+rbind(cbind(rbind(sup_1_ci, sup_2_ci, sup_delta_ci), method = "Supervised"),
+      cbind(rbind(ss_1_ci, ss_2_ci, ss_delta_ci), method = "Infairness"))  %>% 
+  filter(!Metric %in% c("FNR", "FPR")) %>%
+    mutate(Group = factor(Group, levels = c("Group0", "Group1", "Delta")),
+           method = factor(method, levels = c("Supervised", "Infairness"))) %>% ggplot(aes(x = Metric, y = Coverage, fill = method)) +
   geom_bar(stat = "identity", position = "dodge") +
   theme_bw() +
   theme(legend.position = "bottom") +
   geom_abline(intercept = 0.95, slope = 0, col = "red")+
   geom_abline(intercept = 0.9, slope = 0 , linetype = "dashed")+
-  facet_wrap(~Group, ncol = 1) +
-  xlab("")+
-  scale_y_continuous(breaks = c(0, 0.25, 0.5, 0.75, 0.8, 0.9, 0.95), limits = c(0, 1))
+  facet_wrap(~Group, ncol = 3) +
+  scale_y_continuous(breaks = c(0, 0.25, 0.5, 0.75, 0.9, 0.95), limits = c(0, 1))+
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.position = "none")+
+    xlab("")+
+    ylab("Coverage Probability")+
+    scale_fill_manual(values = c("Supervised" = pal_nejm()(3)[2], "Infairness" = pal_nejm()(3)[3]))
+
+ggsave(paste0("Results/Simulation/cp_unbal_",sub(".*_(.*)\\.rds", "\\1", i), ".png"), width = 6, height = 3, dpi = 360, units = "in", device = "png")
+
 
 }
 ```
-
-
-```{r, fig.width = 10, fig.height = 10}
-ggarrange(plotlist = re_list, common.legend = TRUE, legend = "bottom")
-```
-  
-# Point Estimates
-
-```{r, fig.width = 12, fig.height=12}
-png("pest_sim_balanced_main2.png", width = 12, height = 6, units = "in", res = 360)
-ggarrange(plotlist = pest_list_main[c(1,4,3,2)], common.legend = TRUE, legend = "bottom")
-dev.off()
-
-```
-
-# Coverage Probability
-
-```{r, fig.width = 12, fig.height=12}
-ggarrange(plotlist = cp_list, common.legend = TRUE, legend = "bottom")
-```
-
