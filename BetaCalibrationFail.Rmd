@@ -1,0 +1,571 @@
+---
+title: "Beta Calibration"
+author: "Jianhui Gao"
+date: "2025-11-13"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warnings = FALSE)
+## ---- Setup (safe defaults if not defined) ----
+if (!exists("rho")) rho <- 0.4
+if (!exists("n_labeled")) n_labeled <- 1e4
+if (!exists("N_unlabeled")) N_unlabeled <- 0
+if (!exists("prot_att_prevalence")) prot_att_prevalence <- 0.4
+
+library(MASS)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(CalibrationCurves)
+library(betacal)
+```
+
+# Motivation
+
+## Base Case
+
+### Latent Variable Generation
+
+Generate latent variable $Z$ as 
+
+$$
+Z_a = \beta_a^T\boldsymbol{X} + \eta_a^T\boldsymbol{W} + \text{interactions} + \text{nonlinear terms}
+$$
+
+```{r}
+## ---- Your provided block (kept as-is) ----
+# Total sample size.
+N_total <- 1e4
+# Dimension
+p <- 16
+# Generate Covariates
+id_matrix <- diag(p)
+ar_one_matrix <- rho^abs(row(id_matrix) - col(id_matrix))
+sigma <- 3 * ar_one_matrix
+mu <- rep(0, p)
+covariates <- MASS::mvrnorm(N_total, mu, Sigma = sigma)
+colnames(covariates) <- c(paste0("X_", 1:10), paste0("W_", 1:5), "A")
+# Placeholder for Y
+Y <- rep(NA, N_total)
+A <- ifelse(covariates[, "A"] > qnorm(1 - prot_att_prevalence), 1, 0)
+W <- covariates[, 11:15, drop = FALSE]
+X <- covariates[,  1:10, drop = FALSE]
+## ---- Step 2: build latent t and standardized z (as in your DGP) ----
+t <- -0.5 +
+  1.00 * X[, 1] + 0.80 * X[, 2] + 0.60 * X[, 3] + 0.50 * X[, 4] + 0.30 * X[, 5] +
+  0.30 * W[, 1] + 0.20 * W[, 2] - 0.20 * W[, 3] +
+  0.10 * X[, 1] * W[, 1] - 0.10 * X[, 5] * X[, 2] +
+  0.12 * (X[, 3]^2) - 0.08 * (X[, 3]^3) / 3 + 0.10 * (W[, 1]^2)
+z <- as.numeric(scale(t))
+```
+```{r, fig.width=6, fig.height=3, fig.align='center'}
+# Plot Z
+
+# First, it's easiest to put 't' into a data.frame for ggplot
+plot_data <- data.frame(z = z, A = factor(A))
+
+# Now, create the histogram
+ggplot(plot_data, aes(x = z, fill = A)) +
+  geom_histogram(position = "identity", alpha = 0.5, bins = 50) +
+  labs(title = "Histogram of z by Protected Attribute A",
+       x = "Latent Variable z",
+       y = "Count",
+       fill = "Protected Attribute (A)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+# Link functions
+p_true <- numeric(N_total)
+for (a in 0:1) {
+  idx <- which(A == a)
+  za <- z[idx]
+  f <- function(d) mean(1 - exp(-exp(za + d))) - 0.30
+  delta <- tryCatch(
+    uniroot(f, interval = c(-20, 20))$root,
+    error = function(e) uniroot(f, interval = c(-40, 40))$root
+  )
+  if (a == 0) {
+    p_true[idx] <- 1 - exp(-exp(za + delta))
+  } else {
+    p_true[idx] <- pnorm(za + delta)
+  }
+}
+p_true <- pmin(pmax(p_true, 1e-6), 1 - 1e-6)
+```
+
+### Inverse cloglog link
+
+$$
+P(Y = 1 | Z_a) = 1 - \exp(-\exp(Z_a))
+$$
+
+
+```{r, fig.width=4, fig.height=3, fig.align='center'}
+# Plot p_true vs z by A
+plot_data_p <- data.frame(z = z, p_true = p_true, A = factor(A))
+ggplot(plot_data_p, aes(x = z, y = p_true, color = A)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "True Probability by Protected Attributes",
+       x = "Latent Variable z",
+       y = "True Probability",
+       color = "Protected Attribute (A)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+Y <- rbinom(N_total, 1, p_true)
+```
+
+### Model Fitting and Calibration
+
+Regress Y ~ X only within each group A = 0 and A = 1 separately. Then calibrate the predicted probabilities using Beta Calibration within each group.
+
+```{r}
+# model fitting
+indep <- data.frame(Y = Y, A = A, X)
+model_0 <- glm(
+  Y ~ ., family = binomial(),
+  data = indep %>% filter(A == 0)
+)
+
+model_1 <- glm(
+  Y ~ ., family = binomial(),
+  data = indep %>% filter(A == 1)
+)
+
+# Generate test data
+S <- NA_real_
+S[A == 0] <- model_0$fitted.values
+S[A == 1] <- model_1$fitted.values
+
+# Evaluate Calibration
+
+#val.prob(S[A==0], Y[A==0], logistic.cal = FALSE)
+#val.prob(S[A==1], Y[A==1], logistic.cal = FALSE)
+
+# Beta Calibration
+m <- beta_calibration(S[A==0], Y[A==0])
+p1 <- val.prob(beta_predict(S[A==0], m), Y[A==0], logistic.cal = FALSE)
+m <- beta_calibration(S[A==1], Y[A==1])
+p2 <- val.prob(beta_predict(S[A==1], m), Y[A==1], logistic.cal = FALSE)
+ggpubr::ggarrange(p1, p2, ncol = 2, nrow = 1)
+```
+
+## Modified Case:
+### Add another layer of nonlinearity to $g_a(z)$ to create mirror-opposite groups
+
+Define 
+$$
+g_0(z) = 3.2*z + 7.5*exp(-(z - 0.3)^2 / (2 * 0.18^2))
+$$
+and
+$$
+g_1(z) = 3.2*z + 7.5*exp(-(z + 0.3)^2 / (2 * 0.18^2))
+$$
+
+The shift in groups is needed, otherwise the bias will be in the same direction for both groups, and canceled out for delta. Then use same link functions as before to get p_true.
+
+```{r, fig.width=4, fig.height=3, fig.align='center'}
+## ---- Coefficients + “gap” knob (A=1 is scaled-up mirror of A=0) ----
+s0  <- 0.18
+gap <- 0.8  # increase for more separation; A=1 gets (1+gap) scaling
+
+## Base (single) coefficients: define the *shape* once
+b_base        <- 3.20
+amp_up_1_base <- 7.50
+# If you later want multiple bumps/ripples, add them inside f() (kept off by default)
+amp_down_base <- -7.50
+amp_up_2_base <- 9.00
+ripple_amp_base <- 0.60
+ripple_k <- 4
+
+## ---- Symmetry-preserving transform (shared for both groups) ----
+delta  <- 0.10   # center shift (common)
+kappa  <- 0.10   # cubic warp (common)
+width_mult <- 1.00
+s0a <- s0 * width_mult
+
+## ---- Define the base shape f(zt) once; group 1 will be -f(-zt) * (1+gap) ----
+f <- function(zt) {
+  b_base * zt +
+    amp_up_1_base * exp(-(zt - 0.30)^2 / (2 * s0a^2))
+  # + amp_down_base * exp(-(zt - 0.00)^2 / (2 * s0a^2)) +
+  #   amp_up_2_base * exp(-(zt - 0.30)^2 / (2 * s0a^2)) +
+  #   ripple_amp_base * exp(-(zt / 0.50)^2) * sin(2 * pi * ripple_k * plogis(zt))
+}
+f2 <- function(zt) {
+  b_base * zt +
+    amp_up_1_base * exp(-(zt + 0.30)^2 / (2 * s0a^2))
+  # + amp_down_base * exp(-(zt - 0.00)^2 / (2 * s0a^2)) +
+  #   amp_up_2_base * exp(-(zt - 0.30)^2 / (2 * s0a^2)) +
+  #   ripple_amp_base * exp(-(zt / 0.50)^2) * sin(2 * pi * ripple_k * plogis(zt))
+}
+
+## ---- Nonlinear index g(z, A) with enforced anti-symmetry & scaling ----
+g <- numeric(N_total)
+zt_all <- z 
+#+ kappa * (z^3) + delta  # same transform for everyone
+
+idx0 <- which(A == 0)
+idx1 <- which(A == 1)
+
+g[idx0] <- f(zt_all[idx0])                    # A = 0
+g[idx1] <- f2(zt_all[idx1])      # A = 1 is mirrored & scaled
+
+## ---- Plot g vs z by A ----
+plot_data_g <- data.frame(z = z, g = g, A = factor(A))
+ggplot(plot_data_g, aes(x = z, y = g, color = A)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "",
+       x = "Standardized Latent Variable z",
+       y = "Nonlinear Index g",
+       color = "Protected Attribute (A)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+```{r, fig.width=4, fig.height=3, fig.align='center'}
+p_true <- numeric(N_total)
+for (a in 0:1) {
+  idx <- which(A == a)
+  ga <- g[idx]
+  f <- function(d) mean(1 - exp(-exp(ga + d))) - 0.30
+  delta <- tryCatch(
+    uniroot(f, interval = c(-20, 20))$root,
+    error = function(e) uniroot(f, interval = c(-40, 40))$root
+  )
+  if (a == 0) {
+    p_true[idx] <- 1 - exp(-exp(ga + delta))
+  } else {
+    p_true[idx] <- pnorm(ga + delta)
+  }
+}
+p_true <- pmin(pmax(p_true, 1e-6), 1 - 1e-6)
+
+# Plot p_true vs g by A
+plot_data_p_g <- data.frame(g = g, p_true = p_true, A = factor(A))
+ggplot(plot_data_p_g, aes(x = g, y = p_true, color = A)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "True Probability by Protected Attributes",
+       x = "Nonlinear Index g",
+       y = "True Probability p_true",
+       color = "Protected Attribute (A)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+Y <- rbinom(N_total, 1, p_true)
+```
+
+### Model Fitting and Calibration
+Regress Y ~ X only within each group A = 0 and A = 1 separately. Then calibrate the predicted probabilities using Beta Calibration within each group.
+
+```{r}
+# model fitting
+indep <- data.frame(Y = Y, A = A, X)
+model_0 <- glm(
+  Y ~ ., family = binomial(),
+  data = indep %>% filter(A == 0)
+)
+
+model_1 <- glm(
+  Y ~ ., family = binomial(),
+  data = indep %>% filter(A == 1)
+)
+
+# Generate test data
+S <- NA_real_
+S[A == 0] <- model_0$fitted.values
+S[A == 1] <- model_1$fitted.values
+
+# Evaluate Calibration
+
+#val.prob(S[A==0], Y[A==0], logistic.cal = FALSE)
+#val.prob(S[A==1], Y[A==1], logistic.cal = FALSE)
+
+# Beta Calibration
+m <- beta_calibration(S[A==0], Y[A==0])
+val.prob(beta_predict(S[A==0], m), Y[A==0], logistic.cal = FALSE)
+m <- beta_calibration(S[A==1], Y[A==1])
+val.prob(beta_predict(S[A==1], m), Y[A==1], logistic.cal = FALSE)
+```
+
+# Results
+
+```{r}
+result <- readRDS("Data/scenario 5_n=400.rds")
+#result2 <- readRDS("Data/scenario 3_n=1000.rds")
+oracle <- readRDS("Data/scenario 5_oracle.rds")
+
+oracle_est <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  )
+all_lengths <- sapply(result, length)
+
+# 2. Find the indices where the length is not 5
+problem_indices <- which(all_lengths != 5)
+
+# 3. Remove those problematic entries from the result list
+if (length(problem_indices) > 0) {
+  result <- result[-problem_indices]
+}
+
+# Loop over methods =================================
+methods <- names(result[[1]])
+
+results_list <- list()
+
+# Loop over each method to compute bias and MSE
+for (method in methods) {
+  # Create the estimation part (mean)
+  est <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  # Create the variance part (variance)
+  avar <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$var)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "aVar"
+    )
+  
+  evar <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) var(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "eVar"
+    )
+  
+  # Combine estimation and variance
+  combined <- est %>%
+    left_join(avar, by = c("Metric", "Group")) %>%
+    left_join(evar, by = c("Metric", "Group")) %>%
+    mutate(Method = method)
+  
+  # Calculate the bias and MSE by comparing with oracle
+  combined <- combined %>%
+    left_join(oracle_est %>% dplyr::select(Metric, Group, Est) %>% rename(Oracle_Est = Est), 
+              by = c("Metric", "Group")) %>%
+    mutate(bias = Est - Oracle_Est, MSE = bias^2 + eVar)
+  
+  # Append to the results list
+  results_list[[method]] <- combined
+}
+
+# Combine all the results into one data frame
+final_results <- bind_rows(results_list)
+
+# Define the methods for comparison, excluding 'oracle' and 'sup'
+methods <- methods[!methods %in% c("oracle", "sup")]
+
+labels <- c("Infairness(S only)","Infairness(S and W)", "Ji et al. (2020)", "Interaction")
+#labels <- methods
+
+# Filter the MSE from sup_est as the baseline
+sup_mse <- final_results %>%
+  filter(Method == "sup") %>%
+  dplyr::select(Metric, Group, MSE) %>%
+  rename(sup_MSE = MSE)
+
+# Initialize an empty data frame to store RE results
+re_final <- data.frame()
+
+# Loop over each method to compute RE relative to sup_est
+for (i in seq_along(methods)) {
+  
+  # Get the current method and label
+  method <- methods[i]
+  label <- labels[i]
+  
+  # Get MSE of the current method
+  method_mse <- final_results %>%
+    filter(Method == method) %>%
+    dplyr::select(Metric, Group, MSE)
+  
+  # Compute RE (sup_MSE / method_MSE)
+  re_temp <- sup_mse %>%
+    left_join(method_mse, by = c("Metric", "Group")) %>%
+    mutate(RE = sup_MSE / MSE, 
+           Method = label)  # Apply the label
+  
+  # Append to the re_final data frame
+  re_final <- rbind(re_final, re_temp)
+}
+
+
+
+plot_data <- final_results %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  mutate(
+    CI_lower = Est - 1.96 * sqrt(eVar),
+    CI_upper = Est + 1.96 * sqrt(eVar),
+    Metric_num = as.numeric(factor(Metric))  # numeric x for drawing segments
+  ) %>%
+  filter(Method != "oracle") %>%
+  mutate(Method = case_when(
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction",
+    Method == "sup"        ~ "Supervised"
+  )) %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                            "Infairness(S and W)",
+                                            "Interaction",
+                                            "Ji et al. (2020)",
+                                            "Supervised")))
+
+oracle_df <- plot_data %>%
+  distinct(Metric, Oracle_Est, Metric_num, Group) %>%
+  mutate(
+    x_start = Metric_num - 0.45,
+    x_end   = Metric_num + 0.45
+  )
+
+ggplot(plot_data, aes(x = factor(Metric_num), y = Est, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Group) +
+  geom_segment(data = oracle_df,
+               aes(x = x_start, xend = x_end,
+                   y = Oracle_Est, yend = Oracle_Est),
+               inherit.aes = FALSE,
+               color = "black") +
+  scale_x_discrete(
+    labels = parse(text = oracle_df[oracle_df$Group == "Delta",]$Metric)) +
+  ylab("Estimated Value") +
+  xlab("") +
+  ggsci::scale_color_nejm() +
+  theme_bw() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
+                position = position_dodge2(width = 1)) +
+  theme(legend.position = "bottom")
+
+
+re_final %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  filter(!Method == "Ji et al. (2020)") %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                            "Infairness(S and W)",
+                                            "Interaction"))) %>%
+  ggplot(aes(x = Metric, y = RE, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge2()) +
+  theme_bw() +
+  facet_wrap(~Group) +
+  geom_abline(intercept = 1, slope = 0, linetype = "dashed", col = "red") +
+  ylab("Relative Efficiency") +
+  xlab("") +
+  scale_x_discrete(labels = scales::parse_format()) +
+  ggsci::scale_fill_nejm() +
+  theme(legend.position = "bottom")
+
+
+oracle_df <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  ) %>%
+  data.frame()
+
+coverage_result <- c()
+methods <- c("sup", "ss_s", "ss_sw", "ss_Beta", "ss_sw_int")
+
+for (method in methods) {
+  
+  est <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1]))ll[[method]]$est)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  var <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$var)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Var"
+    )
+  
+  for(m in unique(est$Metric)){
+    for(g in unique(est$Group)){
+      est_temp <- est %>% filter(Metric == m, Group == g) %>% pull(Est)
+      var_temp <- var %>% filter(Metric == m, Group == g) %>% pull(Var)
+      
+      coverage <- sum((est_temp - qnorm(0.975) * sqrt(var_temp) <= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"])) &
+                        (est_temp + qnorm(0.975) * sqrt(var_temp) >= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"]))) / length(est_temp)
+      
+      coverage_result <- rbind(coverage_result, data.frame(Method = method, Metric = m, Group = g, Coverage = coverage))
+    }
+  }
+  
+}
+
+coverage_result %>%
+  mutate(Method = case_when(
+    Method == "sup"        ~ "Supervised",
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction"
+  )) %>%
+  mutate(Method = factor(Method, levels = c(
+    "Infairness(S only)",
+    "Infairness(S and W)",
+    "Interaction",
+    "Ji et al. (2020)",
+    "Supervised"))) %>%
+  ggplot(aes(x = Group, y = Coverage, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Metric) +
+  ylab("Coverage Probability") +
+  xlab("") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  ggsci::scale_color_nejm()
+
+model_eval_list <- list()
+
+for (method in methods) {
+  eval <- do.call(rbind, lapply(result, function(ll) {
+    if (!is.null(ll[[method]]) && !is.na(ll[[method]][1])) ll[[method]]$imp_quality else NULL
+  })) %>%
+    as.data.frame()
+  
+  if (nrow(eval) == 0L) next
+  
+  # --- Exclude Inf values ---
+  eval[!is.finite(as.matrix(eval))] <- NA   # replaces Inf / -Inf with NA
+  
+  odd_index  <- seq(1, nrow(eval), by = 2)
+  even_index <- seq(2, nrow(eval), by = 2)
+  
+  g0 <- colMeans(eval[odd_index, , drop = FALSE], na.rm = TRUE)
+  g1 <- colMeans(eval[even_index, , drop = FALSE], na.rm = TRUE)
+  
+  tmp <- rbind(g0, g1) %>% as.data.frame()
+  tmp$Group  <- rownames(tmp)
+  tmp$Method <- method
+  rownames(tmp) <- NULL
+  tmp <- tmp[, c("Method", "Group", setdiff(names(tmp), c("Method", "Group")))]
+  
+  model_eval_list[[length(model_eval_list) + 1L]] <- tmp
+}
+
+model_eval <- dplyr::bind_rows(model_eval_list)
+model_eval
+
+```
+

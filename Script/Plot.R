@@ -2,33 +2,72 @@ library(dplyr)
 library(tidyr)
 library(ggplot2)
 
-result <- readRDS("Data/scenario 1.rds")
+result <- readRDS("Data/scenario 2_1023.rds")
 
 # Oracle =================================
-oracle_est <- do.call(rbind, lapply(result, function(ll) ll$oracle$est)) %>%
-  group_by(Metric) %>%
-  summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+set.seed(1234)
+indep <- DataGeneration(
+  n_labeled = 1e4,
+  N_unlabeled = 0,
+  prot_att_prevalence = prev,
+  model = model,
+  rho = rho
+)
+model_0 <- glm(
+  Y ~ ., family = binomial(),
+  data = indep %>% filter(A == 0) %>% select(Y, contains("X"))
+)
+model_1 <- glm(
+  Y ~ ., family = binomial(),
+  data = indep %>% filter(A == 1) %>% select(Y, contains("X"))
+)
+# generate the main dataset
+dat <- DataGeneration(
+  n_labeled = 1e6,
+  N_unlabeled = 0,
+  prot_att_prevalence = prev,
+  model = model,
+  rho = rho
+)
+# using independent models to get S
+dat$S <- NA_real_
+dat$S[dat$A == 0] <- predict(model_0, newdata = dat %>% filter(A == 0),
+                             type = "response")
+dat$S[dat$A == 1] <- predict(model_1, newdata = dat %>% filter(A == 1),
+                             type = "response")
+# prepare main data
+dat$C <- ifelse(dat$S > threshold, 1, 0)
+labeled   <- dat %>% filter(!is.na(Y_miss))
+
+# supervised on labeled only
+oracle <- Audit_Fairness(
+  Y = dat$Y, S = dat$S, A = dat$A,
+  threshold = threshold,
+  method = "supervised"
+)
+
+oracle_est <- oracle$est %>%
   pivot_longer(
     cols = -c(Metric),
     names_to = "Group",
     values_to = "Est"
   )
 
-oracle_avar <- do.call(rbind, lapply(result, function(ll) ll$oracle$var)) %>%
-  group_by(Metric) %>%
-  summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
-  pivot_longer(
-    cols = -c(Metric),
-    names_to = "Group",
-    values_to = "aVar"
-  )
+#oracle_avar <- do.call(rbind, lapply(result, function(ll) ll$oracle$var)) %>%
+#  group_by(Metric) %>%
+#  summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+#  pivot_longer(
+#    cols = -c(Metric),
+#    names_to = "Group",
+#    values_to = "aVar"
+#  )
 
-oracle <- oracle_est %>%
-  left_join(oracle_avar, by = c("Metric", "Group"))
+#oracle <- oracle_est %>%
+#  left_join(oracle_avar, by = c("Metric", "Group"))
 
 
 # Loop over methods =================================
-methods <- names(result[[1]])[-1]
+methods <- names(result[[1]])
 
 results_list <- list()
 
@@ -72,7 +111,7 @@ for (method in methods) {
   
   # Calculate the bias and MSE by comparing with oracle
   combined <- combined %>%
-    left_join(oracle %>% select(Metric, Group, Est) %>% rename(Oracle_Est = Est), 
+    left_join(oracle_est %>% select(Metric, Group, Est) %>% rename(Oracle_Est = Est), 
               by = c("Metric", "Group")) %>%
     mutate(bias = Est - Oracle_Est, MSE = bias^2 + eVar)
   
@@ -86,7 +125,8 @@ final_results <- bind_rows(results_list)
 # Define the methods for comparison, excluding 'oracle' and 'sup'
 methods <- methods[!methods %in% c("oracle", "sup")]
 
-labels <- c("Infairness(S and W)", "Infairness(S only)", "Ji et al. (2020)")
+#labels <- c( "Infairness(S only)","Infairness(S and W)", "Ji et al. (2020)", "Interaction")
+labels <- methods
 
 # Filter the MSE from sup_est as the baseline
 sup_mse <- final_results %>%
@@ -120,20 +160,20 @@ for (i in seq_along(methods)) {
 }
 
 # Convert 'Method' to a factor with the correct order for plotting, if needed
-re_final$Method <- factor(re_final$Method, 
-                          levels = c("Infairness(S only)", 
-                                     "Infairness(S and W)", 
-                                     "Ji et al. (2020)"))
+#re_final$Method <- factor(re_final$Method, 
+#                          levels = c("Infairness(S only)", 
+#                                     "Infairness(S and W)", 
+#                                     "Ji et al. (2020)"))
 
-final_results$Method <- factor(
-  final_results$Method,
-  levels = c("sup", "ss_poly", "ss", "beta"),
-  labels = c(
-    "Supervised",
-    "Infairness(S only)",
-    "Infairness(S and W)",  # Bold W using LaTeX syntax
-    "Ji et al. (2020)"
-  ))
+# final_results$Method <- factor(
+#   final_results$Method,
+#   levels = c("sup", "ss_poly", "ss", "beta"),
+#   labels = c(
+#     "Supervised",
+#     "Infairness(S only)",
+#     "Infairness(S and W)",  # Bold W using LaTeX syntax
+#     "Ji et al. (2020)"
+#   ))
 plot_data <- final_results %>%
   filter(Group == "Delta") %>%
   filter(!Metric %in% c("TNR", "FNR")) %>%
@@ -164,6 +204,8 @@ p1 <- ggplot(plot_data, aes(x = factor(Metric_num), y = Est, color = Method)) +
   xlab("") +
   ggsci::scale_color_nejm() +
   theme_bw() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
+                position = position_dodge2(width = 1))+
   theme(legend.position = "none")
 
 p2 <- re_final %>%

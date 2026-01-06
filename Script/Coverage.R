@@ -3,11 +3,61 @@ library(tidyr)
 library(ggplot2)
 
 
-result <- readRDS("Data/scenario 1.rds")
+result <- readRDS("Data/scenario 31023.rds")
 
+# Oracle =================================
+set.seed(1234)
+indep <- DataGeneration(
+  n_labeled = 1e4,
+  N_unlabeled = 0,
+  prot_att_prevalence = prev,
+  model = model,
+  rho = rho
+)
+model_0 <- glm(
+  Y ~ ., family = binomial(),
+  data = indep %>% filter(A == 0) %>% select(Y, contains("X"))
+)
+model_1 <- glm(
+  Y ~ ., family = binomial(),
+  data = indep %>% filter(A == 1) %>% select(Y, contains("X"))
+)
+# generate the main dataset
+dat <- DataGeneration(
+  n_labeled = 1e6,
+  N_unlabeled = 0,
+  prot_att_prevalence = prev,
+  model = model,
+  rho = rho
+)
+# using independent models to get S
+dat$S <- NA_real_
+dat$S[dat$A == 0] <- predict(model_0, newdata = dat %>% filter(A == 0),
+                             type = "response")
+dat$S[dat$A == 1] <- predict(model_1, newdata = dat %>% filter(A == 1),
+                             type = "response")
+# prepare main data
+dat$C <- ifelse(dat$S > threshold, 1, 0)
+labeled   <- dat %>% filter(!is.na(Y_miss))
+
+# supervised on labeled only
+oracle <- Audit_Fairness(
+  Y = dat$Y, S = dat$S, A = dat$A,
+  threshold = threshold,
+  method = "supervised"
+)
+
+oracle <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  ) %>%
+  data.frame()
 
 coverage_result <- c()
-methods <- c("sup", "ss_poly", "ss")
+methods <- c("sup", "ss_s", "ss_s", "ss_Beta", "ss_sw_int")
+
 for (method in methods) {
   
   est <- do.call(rbind, lapply(result, function(ll) ll[[method]]$est)) %>%

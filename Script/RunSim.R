@@ -1,6 +1,6 @@
 library(dplyr)
-library(Infairness)
 library(glmnet)
+library(SSFairnessAudit)
 
 # Parameters
 prev <- 0.4 # Prevalence of the protected attribute.
@@ -9,13 +9,13 @@ n <- 500 * nclass # Labeled data size.
 N <- 1e4 * nclass # Unlabeled data size.
 rho <- 0.4
 threshold <- 0.5
-model <- "scenario 1"
+model <- "scenario 3"
 nsim <- 1e4
 
 # Generate training data
 set.seed(1234)
-indep <- DataGeneration(
-  n_labeled = 3000,
+indep <- Infairness::DataGeneration(
+  n_labeled = 1e4,
   N_unlabeled = 0,
   prot_att_prevalence = prev,
   model = model,
@@ -33,7 +33,7 @@ model_1 <- glm(Y ~ ., family = binomial(), data = indep %>% filter(A == 1)
 result <- list()
 for(i in 1:nsim) {
   # generate the main dataset
-  dat <- DataGeneration(
+  dat <- Infairness::DataGeneration(
     n_labeled = n,
     N_unlabeled = N,
     prot_att_prevalence = prev,
@@ -72,7 +72,8 @@ for(i in 1:nsim) {
                               S = dat$S,
                               A = dat$A,
                               threshold = threshold,
-                              method = "Infairness",
+                              #method = "Infairness",
+                          method = "semi-supervised",
                               basis = "Poly(S)")
 
   # Infairness (S, W)
@@ -80,9 +81,13 @@ for(i in 1:nsim) {
                           S = dat$S,
                           A = dat$A,
                           threshold = threshold,
-                          method = "Infairness",
-                          W = dat %>% select(contains("W")) %>% as.matrix(),
-                          basis = "Poly(S, W)")
+                          #method = "Infairness",
+                          method = "semi-supervised",
+                          X = dat %>% select(contains("W")) %>% as.matrix(),
+                          #W = dat %>% select(contains("W")) %>% as.matrix(),
+                          #basis = "Poly(S, W)",
+                          basis = "Poly(S, X)"
+                          )
   
   
   # Beta Calibration
@@ -93,12 +98,31 @@ for(i in 1:nsim) {
     basis = "Beta"
   )
   
+  # Interaction terms
+  W <- dat %>% select(contains("W")) %>% as.matrix()
+  W_interact <- dat$S * W
+  W <- cbind(W, W_interact)
+  
+  ss_sw_int <-  Audit_Fairness(Y = dat$Y_miss,
+                              S = dat$S,
+                              A = dat$A,
+                              threshold = threshold,
+                              #method = "Infairness",
+                              method = "semi-supervised",
+                              X = W,
+                              #W = W,
+                              #basis = "Poly(S, W)",
+                              basis = "Poly(S, X)"
+  )
+  
   result[[i]] <- list(
     oracle = oracle,
     sup = sup,
     ss_s = ss_s,
     ss_sw = ss_sw,
-    ss_Beta = ss_Beta
+    ss_Beta = ss_Beta,
+    ss_sw_int = ss_sw_int
   )
+  svMisc::progress(i, max.value = nsim)
 }
-saveRDS(result, file = paste0(model,".rds"))
+saveRDS(result, file = paste0(model, "1023", ".rds"))

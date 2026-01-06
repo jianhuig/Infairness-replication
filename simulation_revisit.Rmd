@@ -1,0 +1,1267 @@
+---
+title: "Simulation Revisit"
+author: "Jianhui Gao"
+date: "2025-10-26"
+output: pdf_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r, setup, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(SSFairnessAudit)
+source("DataGeneration.R")
+prev <- 0.4
+rho <- 0.4
+threshold <- 0.5
+knitr::opts_chunk$set(echo = FALSE, fig.width = 12, fig.height = 4)
+```
+
+```{=tex}
+\tableofcontents
+
+```
+
+\newpage
+
+# Data Generation
+
+To generate $(X^T , W^T , A)^T$ , we first simulated 16 random variables
+from a zero-mean multivariate normal distribution with a first-order
+autoregressive covariance structure. The covariance between the k-th and
+l-th random variables was set to $3(0.4)^{|k-l|}$. The first 10 random
+variables were used as the features, $X$, for model training, and the
+next 5 as auxiliary covariates, $W$, for validation. The final random
+variable was used to obtain the protected attribute, $A$, and set to 1
+if the normally generated value exceeded 0.253 and set to 0 otherwise.
+The outcome $Y$ was generated under two diﬀerent scenarios to induce
+varying degrees of misspecification into the ML and imputation models: 
+
+- Scenario 1 (Old): Logistic activation function with non-linear inputs
+$$P(Y = 1 | X, W, A= a) = expit\{-2.3 + \beta_a^TX + \gamma_a^TW + 0.2X_2^2- 0.1X_3^2 + 0.1X_5X_6\}$$
+
+
+- Scenario 2 (Old): Non-logistic activation function with non-linear hidden
+layer $$P (Y = 1 | X, W, A= a) = exp\{-(1.3 + \beta_a^TX + \gamma_a^T
+W)^2\}$$
+
+- Scenario 3 (New): Tree Structure
+
+$\eta = \beta^TX + \gamma^T + X_4^2 - X_5^2 + 0.3X_1W_1 - 0.3X_2W_2 + 0.2X_3W_3 + \tanh(0.4W_5) - \tanh(0.2X_4) + 0.1\sin(2W_4X_5)$ and $\psi = \beta^TX + \gamma^T - 0.4W_4^2 + 0.3W_5^2 + 0.2X_1W_1 - 0.2X_2W_2 + 0.1X_3W_3 + \tanh(0.3X_5) - \tanh(0.1W_4) + 0.1\cos(2X_4W_5)$. Then generate S as:
+
+$$
+S = \begin{cases}
+0.8 & if A = 0, \eta_a > 0.5, \psi_a > 0.3 \\
+0.6 & if A = 0, \eta_a > 0.5, \psi_a \leq 0.3 \\
+0.4 & if A = 0, \eta_a \leq 0.5, \psi_a > 0.3 \\
+0.2 & if A = 0, \eta_a \leq 0.5, \psi_a \leq 0.3 \\
+0.7 & if A = 1, \eta_a > 0.3, \psi_a > 0.5 \\
+0.5 & if A = 1, \eta_a > 0.3, \psi_a \leq 0.5 \\
+0.3 & if A = 1, \eta_a \leq 0.3, \psi_a > 0.5 \\
+0.1 & if A = 1, \eta_a \leq 0.3, \psi_a \leq 0.5 \\
+\end{cases}
+$$
+
+Finally $P(Y = 1 \mid X, W, A = a) = S$
+
+
+
+
+- Scenario 4 (New): Log-log activation function with non-monotone effect
+
+$$P(Y = 1 | X, W, A= a) = 1 - exp\{-exp(g_a(Z))\}$$
+
+where 
+$$
+Z = -0.5 + \beta_a^TX + \gamma_a^TW + 0.1X_1W_1 - 0.1X_2X_5 + 0.12X_3^2 - 0.08X_3^3/3 + 0.10W_1^2
+$$
+and
+
+$$
+g_a(z)\;=\; b_a\,z
+\;+\; u_{1a}\,\exp\!\Big\{-\tfrac{(z+0.30)^2}{2\,s_0^2}\Big\}
+\;+\; d_a\,\exp\!\Big\{-\tfrac{z^2}{2\,s_0^2}\Big\}
+\;+\; u_{2a}\,\exp\!\Big\{-\tfrac{(z-0.30)^2}{2\,s_0^2}\Big\}
+\;+\; r_a\,\exp\!\big\{-(z/0.50)^2\big\}\,\sin\!\big(2\pi k\,\sigma(z)\big)
+$$
+
+# Scenario 1 
+
+```{r}
+result <- readRDS("Data/scenario 1_n=400.rds")
+oracle <- readRDS("Data/scenario 1_oracle.rds")
+
+oracle_est <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  )
+
+all_lengths <- sapply(result, length)
+
+# 2. Find the indices where the length is not 5
+problem_indices <- which(all_lengths != 5)
+
+# 3. Remove those problematic entries from the result list
+if (length(problem_indices) > 0) {
+  result <- result[-problem_indices]
+}
+```
+
+```{r}
+# Loop over methods =================================
+methods <- names(result[[1]])
+
+results_list <- list()
+
+# Loop over each method to compute bias and MSE
+for (method in methods) {
+  
+  # Create the estimation part (mean)
+  est <- do.call(rbind, lapply(result, function(ll) if(!is.na(ll[[method]][1])) ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  # Create the variance part (variance)
+  avar <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$var)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "aVar"
+    )
+  
+  evar <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) var(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "eVar"
+    )
+  
+  # Combine estimation and variance
+  combined <- est %>%
+    left_join(avar, by = c("Metric", "Group")) %>%
+    left_join(evar, by = c("Metric", "Group")) %>%
+    mutate(Method = method)
+  
+  # Calculate the bias and MSE by comparing with oracle
+  combined <- combined %>%
+    left_join(oracle_est %>% select(Metric, Group, Est) %>% rename(Oracle_Est = Est), 
+              by = c("Metric", "Group")) %>%
+    mutate(bias = Est - Oracle_Est, MSE = bias^2 + eVar)
+  
+  # Append to the results list
+  results_list[[method]] <- combined
+}
+
+# Combine all the results into one data frame
+final_results <- bind_rows(results_list)
+
+# Define the methods for comparison, excluding 'oracle' and 'sup'
+methods <- methods[!methods %in% c("oracle", "sup")]
+
+labels <- c("Infairness(S only)","Infairness(S and W)", "Ji et al. (2020)", "Interaction")
+#labels <- methods
+
+# Filter the MSE from sup_est as the baseline
+sup_mse <- final_results %>%
+  filter(Method == "sup") %>%
+  select(Metric, Group, MSE) %>%
+  rename(sup_MSE = MSE)
+
+# Initialize an empty data frame to store RE results
+re_final <- data.frame()
+
+# Loop over each method to compute RE relative to sup_est
+for (i in seq_along(methods)) {
+  
+  # Get the current method and label
+  method <- methods[i]
+  label <- labels[i]
+  
+  # Get MSE of the current method
+  method_mse <- final_results %>%
+    filter(Method == method) %>%
+    select(Metric, Group, MSE)
+  
+  # Compute RE (sup_MSE / method_MSE)
+  re_temp <- sup_mse %>%
+    left_join(method_mse, by = c("Metric", "Group")) %>%
+    mutate(RE = sup_MSE / MSE, 
+           Method = label)  # Apply the label
+  
+  # Append to the re_final data frame
+  re_final <- rbind(re_final, re_temp)
+}
+```
+
+```{r}
+plot_data <- final_results %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  mutate(
+    CI_lower = Est - 1.96 * sqrt(eVar),
+    CI_upper = Est + 1.96 * sqrt(eVar),
+    Metric_num = as.numeric(factor(Metric))  # numeric x for drawing segments
+  ) %>%
+  filter(Method != "oracle") %>%
+  mutate(Method = case_when(
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction",
+    Method == "sup"        ~ "Supervised"
+  )) %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction",
+                                      "Ji et al. (2020)",
+                                      "Supervised")))
+
+oracle_df <- plot_data %>%
+  distinct(Metric, Oracle_Est, Metric_num, Group) %>%
+  mutate(
+    x_start = Metric_num - 0.45,
+    x_end   = Metric_num + 0.45
+  )
+
+ggplot(plot_data, aes(x = factor(Metric_num), y = Est, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Group) +
+  geom_segment(data = oracle_df,
+               aes(x = x_start, xend = x_end,
+                   y = Oracle_Est, yend = Oracle_Est),
+               inherit.aes = FALSE,
+               color = "black") +
+  scale_x_discrete(
+    labels = parse(text = oracle_df[oracle_df$Group == "Delta",]$Metric)) +
+  ylab("Estimated Value") +
+  xlab("") +
+  ggsci::scale_color_nejm() +
+  theme_bw() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
+                position = position_dodge2(width = 1)) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+re_final %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  filter(!Method == "Ji et al. (2020)") %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction"))) %>%
+  ggplot(aes(x = Metric, y = RE, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge2()) +
+  theme_bw() +
+  facet_wrap(~Group) +
+  geom_abline(intercept = 1, slope = 0, linetype = "dashed", col = "red") +
+  ylab("Relative Efficiency") +
+  xlab("") +
+  scale_x_discrete(labels = scales::parse_format()) +
+  ggsci::scale_fill_nejm() +
+  theme(legend.position = "bottom")
+```
+
+
+
+```{r, fig.width = 12, fig.height = 6}
+oracle_df <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  ) %>%
+  data.frame()
+
+coverage_result <- c()
+methods <- c("sup", "ss_s", "ss_sw", "ss_Beta", "ss_sw_int")
+
+for (method in methods) {
+  
+  est <- do.call(rbind, lapply(result, function(ll) ll[[method]]$est)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  var <- do.call(rbind, lapply(result, function(ll) ll[[method]]$var)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Var"
+    )
+  
+  for(m in unique(est$Metric)){
+    for(g in unique(est$Group)){
+      est_temp <- est %>% filter(Metric == m, Group == g) %>% pull(Est)
+      var_temp <- var %>% filter(Metric == m, Group == g) %>% pull(Var)
+      
+      coverage <- sum((est_temp - qnorm(0.975) * sqrt(var_temp) <= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"])) &
+                        (est_temp + qnorm(0.975) * sqrt(var_temp) >= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"]))) / length(est_temp)
+      
+      coverage_result <- rbind(coverage_result, data.frame(Method = method, Metric = m, Group = g, Coverage = coverage))
+    }
+  }
+  
+}
+
+coverage_result %>%
+  mutate(Method = case_when(
+    Method == "sup"        ~ "Supervised",
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction"
+  )) %>%
+  mutate(Method = factor(Method, levels = c(
+                                      "Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction",
+                                      "Ji et al. (2020)",
+                                      "Supervised"))) %>%
+  ggplot(aes(x = Group, y = Coverage, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Metric) +
+  ylab("Coverage Probability") +
+  xlab("") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  ggsci::scale_color_nejm()
+```
+
+```{r}
+
+model_eval_list <- list()
+
+for (method in methods) {
+  eval <- do.call(rbind, lapply(result, function(ll) {
+    if (!is.null(ll[[method]]) && !is.na(ll[[method]][1])) ll[[method]]$imp_quality else NULL
+  })) %>%
+    as.data.frame()
+  
+  if (nrow(eval) == 0L) next
+  
+  # --- Exclude Inf values ---
+  eval[!is.finite(as.matrix(eval))] <- NA   # replaces Inf / -Inf with NA
+  
+  odd_index  <- seq(1, nrow(eval), by = 2)
+  even_index <- seq(2, nrow(eval), by = 2)
+  
+  g0 <- colMeans(eval[odd_index, , drop = FALSE], na.rm = TRUE)
+  g1 <- colMeans(eval[even_index, , drop = FALSE], na.rm = TRUE)
+  
+  tmp <- rbind(g0, g1) %>% as.data.frame()
+  tmp$Group  <- rownames(tmp)
+  tmp$Method <- method
+  rownames(tmp) <- NULL
+  tmp <- tmp[, c("Method", "Group", setdiff(names(tmp), c("Method", "Group")))]
+  
+  model_eval_list[[length(model_eval_list) + 1L]] <- tmp
+}
+
+model_eval <- dplyr::bind_rows(model_eval_list)
+model_eval
+```
+
+
+
+# Scenario 2
+
+```{r}
+result <- readRDS("Data/scenario 2_n=400.rds")
+oracle <- readRDS("Data/scenario 2_oracle.rds")
+
+oracle_est <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  )
+
+
+```
+
+```{r}
+# Loop over methods =================================
+methods <- names(result[[1]])
+
+results_list <- list()
+
+# Loop over each method to compute bias and MSE
+for (method in methods) {
+  
+  # Create the estimation part (mean)
+  est <- do.call(rbind, lapply(result, function(ll) if(!is.na(ll[[method]][1])) ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  # Create the variance part (variance)
+  avar <- do.call(rbind, lapply(result, function(ll) if(!is.na(ll[[method]][1])) ll[[method]]$var)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "aVar"
+    )
+  
+  evar <- do.call(rbind, lapply(result, function(ll) if(!is.na(ll[[method]][1])) ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) var(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "eVar"
+    )
+  
+  # Combine estimation and variance
+  combined <- est %>%
+    left_join(avar, by = c("Metric", "Group")) %>%
+    left_join(evar, by = c("Metric", "Group")) %>%
+    mutate(Method = method)
+  
+  # Calculate the bias and MSE by comparing with oracle
+  combined <- combined %>%
+    left_join(oracle_est %>% select(Metric, Group, Est) %>% rename(Oracle_Est = Est), 
+              by = c("Metric", "Group")) %>%
+    mutate(bias = Est - Oracle_Est, MSE = bias^2 + eVar)
+  
+  # Append to the results list
+  results_list[[method]] <- combined
+}
+
+# Combine all the results into one data frame
+final_results <- bind_rows(results_list)
+
+# Define the methods for comparison, excluding 'oracle' and 'sup'
+methods <- methods[!methods %in% c("oracle", "sup")]
+
+labels <- c("Infairness(S only)","Infairness(S and W)", "Ji et al. (2020)", "Interaction")
+#labels <- methods
+
+# Filter the MSE from sup_est as the baseline
+sup_mse <- final_results %>%
+  filter(Method == "sup") %>%
+  select(Metric, Group, MSE) %>%
+  rename(sup_MSE = MSE)
+
+# Initialize an empty data frame to store RE results
+re_final <- data.frame()
+
+# Loop over each method to compute RE relative to sup_est
+for (i in seq_along(methods)) {
+  
+  # Get the current method and label
+  method <- methods[i]
+  label <- labels[i]
+  
+  # Get MSE of the current method
+  method_mse <- final_results %>%
+    filter(Method == method) %>%
+    select(Metric, Group, MSE)
+  
+  # Compute RE (sup_MSE / method_MSE)
+  re_temp <- sup_mse %>%
+    left_join(method_mse, by = c("Metric", "Group")) %>%
+    mutate(RE = sup_MSE / MSE, 
+           Method = label)  # Apply the label
+  
+  # Append to the re_final data frame
+  re_final <- rbind(re_final, re_temp)
+}
+```
+
+```{r}
+plot_data <- final_results %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  mutate(
+    CI_lower = Est - 1.96 * sqrt(eVar),
+    CI_upper = Est + 1.96 * sqrt(eVar),
+    Metric_num = as.numeric(factor(Metric))  # numeric x for drawing segments
+  ) %>%
+  filter(Method != "oracle") %>%
+  mutate(Method = case_when(
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction",
+    Method == "sup"        ~ "Supervised"
+  )) %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction",
+                                      "Ji et al. (2020)",
+                                      "Supervised")))
+
+oracle_df <- plot_data %>%
+  distinct(Metric, Oracle_Est, Metric_num, Group) %>%
+  mutate(
+    x_start = Metric_num - 0.45,
+    x_end   = Metric_num + 0.45
+  )
+
+ggplot(plot_data, aes(x = factor(Metric_num), y = Est, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Group) +
+  geom_segment(data = oracle_df,
+               aes(x = x_start, xend = x_end,
+                   y = Oracle_Est, yend = Oracle_Est),
+               inherit.aes = FALSE,
+               color = "black") +
+  scale_x_discrete(
+    labels = parse(text = oracle_df[oracle_df$Group == "Delta",]$Metric)) +
+  ylab("Estimated Value") +
+  xlab("") +
+  ggsci::scale_color_nejm() +
+  theme_bw() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
+                position = position_dodge2(width = 1)) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+re_final %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  filter(!Method == "Ji et al. (2020)") %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction"))) %>%
+  ggplot(aes(x = Metric, y = RE, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge2()) +
+  theme_bw() +
+  facet_wrap(~Group) +
+  geom_abline(intercept = 1, slope = 0, linetype = "dashed", col = "red") +
+  ylab("Relative Efficiency") +
+  xlab("") +
+  scale_x_discrete(labels = scales::parse_format()) +
+  ggsci::scale_fill_nejm() +
+  theme(legend.position = "bottom")
+```
+
+```{r, fig.width = 12, fig.height = 6}
+oracle_df <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  ) %>%
+  data.frame()
+
+coverage_result <- c()
+methods <- c("sup", "ss_s", "ss_sw", "ss_Beta", "ss_sw_int")
+
+for (method in methods) {
+  
+  est <- do.call(rbind, lapply(result, function(ll) ll[[method]]$est)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  var <- do.call(rbind, lapply(result, function(ll) ll[[method]]$var)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Var"
+    )
+  
+  for(m in unique(est$Metric)){
+    for(g in unique(est$Group)){
+      est_temp <- est %>% filter(Metric == m, Group == g) %>% pull(Est)
+      var_temp <- var %>% filter(Metric == m, Group == g) %>% pull(Var)
+      
+      coverage <- sum((est_temp - qnorm(0.975) * sqrt(var_temp) <= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"])) &
+                        (est_temp + qnorm(0.975) * sqrt(var_temp) >= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"]))) / length(est_temp)
+      
+      coverage_result <- rbind(coverage_result, data.frame(Method = method, Metric = m, Group = g, Coverage = coverage))
+    }
+  }
+  
+}
+
+coverage_result %>%
+  mutate(Method = case_when(
+    Method == "sup"        ~ "Supervised",
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction"
+  )) %>%
+  mutate(Method = factor(Method, levels = c(
+                                      "Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction",
+                                      "Ji et al. (2020)",
+                                      "Supervised"))) %>%
+  ggplot(aes(x = Group, y = Coverage, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Metric) +
+  ylab("Coverage Probability") +
+  xlab("") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  ggsci::scale_color_nejm()
+```
+
+```{r}
+
+model_eval_list <- list()
+
+for (method in methods) {
+  eval <- do.call(rbind, lapply(result, function(ll) {
+    if (!is.null(ll[[method]]) && !is.na(ll[[method]][1])) ll[[method]]$imp_quality else NULL
+  })) %>%
+    as.data.frame()
+  
+  if (nrow(eval) == 0L) next
+  
+  # --- Exclude Inf values ---
+  eval[!is.finite(as.matrix(eval))] <- NA   # replaces Inf / -Inf with NA
+  
+  odd_index  <- seq(1, nrow(eval), by = 2)
+  even_index <- seq(2, nrow(eval), by = 2)
+  
+  g0 <- colMeans(eval[odd_index, , drop = FALSE], na.rm = TRUE)
+  g1 <- colMeans(eval[even_index, , drop = FALSE], na.rm = TRUE)
+  
+  tmp <- rbind(g0, g1) %>% as.data.frame()
+  tmp$Group  <- rownames(tmp)
+  tmp$Method <- method
+  rownames(tmp) <- NULL
+  tmp <- tmp[, c("Method", "Group", setdiff(names(tmp), c("Method", "Group")))]
+  
+  model_eval_list[[length(model_eval_list) + 1L]] <- tmp
+}
+
+model_eval <- dplyr::bind_rows(model_eval_list)
+model_eval
+```
+
+
+
+# Scenario 3 (Tree Model)
+
+```{r}
+result <- readRDS("Data/tree_n=400.rds")
+oracle <- readRDS("Data/tree_oracle.rds")
+
+oracle_est <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  )
+all_lengths <- sapply(result, length)
+
+# 2. Find the indices where the length is not 5
+problem_indices <- which(all_lengths != 5)
+
+# 3. Remove those problematic entries from the result list
+if (length(problem_indices) > 0) {
+  result <- result[-problem_indices]
+}
+```
+
+```{r}
+# Loop over methods =================================
+methods <- names(result[[1]])
+
+results_list <- list()
+
+# Loop over each method to compute bias and MSE
+for (method in methods) {
+  
+  # Create the estimation part (mean)
+  est <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1]))  ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  # Create the variance part (variance)
+  avar <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1]))  ll[[method]]$var)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "aVar"
+    )
+  
+  evar <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) var(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "eVar"
+    )
+  
+  # Combine estimation and variance
+  combined <- est %>%
+    left_join(avar, by = c("Metric", "Group")) %>%
+    left_join(evar, by = c("Metric", "Group")) %>%
+    mutate(Method = method)
+  
+  # Calculate the bias and MSE by comparing with oracle
+  combined <- combined %>%
+    left_join(oracle_est %>% select(Metric, Group, Est) %>% rename(Oracle_Est = Est), 
+              by = c("Metric", "Group")) %>%
+    mutate(bias = Est - Oracle_Est, MSE = bias^2 + eVar)
+  
+  # Append to the results list
+  results_list[[method]] <- combined
+}
+
+# Combine all the results into one data frame
+final_results <- bind_rows(results_list)
+
+# Define the methods for comparison, excluding 'oracle' and 'sup'
+methods <- methods[!methods %in% c("oracle", "sup")]
+
+labels <- c("Infairness(S only)","Infairness(S and W)", "Ji et al. (2020)", "Interaction")
+#labels <- methods
+
+# Filter the MSE from sup_est as the baseline
+sup_mse <- final_results %>%
+  filter(Method == "sup") %>%
+  select(Metric, Group, MSE) %>%
+  rename(sup_MSE = MSE)
+
+# Initialize an empty data frame to store RE results
+re_final <- data.frame()
+
+# Loop over each method to compute RE relative to sup_est
+for (i in seq_along(methods)) {
+  
+  # Get the current method and label
+  method <- methods[i]
+  label <- labels[i]
+  
+  # Get MSE of the current method
+  method_mse <- final_results %>%
+    filter(Method == method) %>%
+    select(Metric, Group, MSE)
+  
+  # Compute RE (sup_MSE / method_MSE)
+  re_temp <- sup_mse %>%
+    left_join(method_mse, by = c("Metric", "Group")) %>%
+    mutate(RE = sup_MSE / MSE, 
+           Method = label)  # Apply the label
+  
+  # Append to the re_final data frame
+  re_final <- rbind(re_final, re_temp)
+}
+```
+
+```{r}
+plot_data <- final_results %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  mutate(
+    CI_lower = Est - 1.96 * sqrt(eVar),
+    CI_upper = Est + 1.96 * sqrt(eVar),
+    Metric_num = as.numeric(factor(Metric))  # numeric x for drawing segments
+  ) %>%
+  filter(Method != "oracle") %>%
+  mutate(Method = case_when(
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction",
+    Method == "sup"        ~ "Supervised"
+  )) %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction",
+                                      "Ji et al. (2020)",
+                                      "Supervised")))
+
+oracle_df <- plot_data %>%
+  distinct(Metric, Oracle_Est, Metric_num, Group) %>%
+  mutate(
+    x_start = Metric_num - 0.45,
+    x_end   = Metric_num + 0.45
+  )
+
+ggplot(plot_data, aes(x = factor(Metric_num), y = Est, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Group) +
+  geom_segment(data = oracle_df,
+               aes(x = x_start, xend = x_end,
+                   y = Oracle_Est, yend = Oracle_Est),
+               inherit.aes = FALSE,
+               color = "black") +
+  scale_x_discrete(
+    labels = parse(text = oracle_df[oracle_df$Group == "Delta",]$Metric)) +
+  ylab("Estimated Value") +
+  xlab("") +
+  ggsci::scale_color_nejm() +
+  theme_bw() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
+                position = position_dodge2(width = 1)) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+re_final %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  filter(!Method == "Ji et al. (2020)") %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction"))) %>%
+  ggplot(aes(x = Metric, y = RE, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge2()) +
+  theme_bw() +
+  facet_wrap(~Group) +
+  geom_abline(intercept = 1, slope = 0, linetype = "dashed", col = "red") +
+  ylab("Relative Efficiency") +
+  xlab("") +
+  scale_x_discrete(labels = scales::parse_format()) +
+  ggsci::scale_fill_nejm() +
+  theme(legend.position = "bottom")
+```
+
+```{r, fig.width = 12, fig.height = 6}
+oracle_df <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  ) %>%
+  data.frame()
+
+coverage_result <- c()
+methods <- c("sup", "ss_s", "ss_sw", "ss_Beta", "ss_sw_int")
+
+for (method in methods) {
+  
+  est <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$est)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  var <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$var)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Var"
+    )
+  
+  for(m in unique(est$Metric)){
+    for(g in unique(est$Group)){
+      est_temp <- est %>% filter(Metric == m, Group == g) %>% pull(Est)
+      var_temp <- var %>% filter(Metric == m, Group == g) %>% pull(Var)
+      
+      coverage <- sum((est_temp - qnorm(0.975) * sqrt(var_temp) <= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"])) &
+                        (est_temp + qnorm(0.975) * sqrt(var_temp) >= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"]))) / length(est_temp)
+      
+      coverage_result <- rbind(coverage_result, data.frame(Method = method, Metric = m, Group = g, Coverage = coverage))
+    }
+  }
+  
+}
+
+coverage_result %>%
+  mutate(Method = case_when(
+    Method == "sup"        ~ "Supervised",
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction"
+  )) %>%
+  mutate(Method = factor(Method, levels = c(
+                                      "Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction",
+                                      "Ji et al. (2020)",
+                                      "Supervised"))) %>%
+  ggplot(aes(x = Group, y = Coverage, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Metric) +
+  ylab("Coverage Probability") +
+  xlab("") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  ggsci::scale_color_nejm()
+```
+
+```{r}
+# percentage bias
+final_results %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  mutate(Percent_Bias = (bias / Oracle_Est) * 100) %>%
+  ggplot(aes(x = Metric, y = Percent_Bias, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge2()) +
+  theme_bw() +
+  facet_wrap(~Group) +
+  geom_hline(yintercept = 0, linetype = "dashed", col = "red") +
+  ylab("Percentage Bias (%)") +
+  xlab("") +
+  scale_x_discrete(labels = scales::parse_format()) +
+  ggsci::scale_fill_nejm() +
+  theme(legend.position = "bottom")
+```
+
+
+```{r}
+
+model_eval_list <- list()
+
+for (method in methods) {
+  eval <- do.call(rbind, lapply(result, function(ll) {
+    if (!is.null(ll[[method]]) && !is.na(ll[[method]][1])) ll[[method]]$imp_quality else NULL
+  })) %>%
+    as.data.frame()
+  
+  if (nrow(eval) == 0L) next
+  
+  # --- Exclude Inf values ---
+  eval[!is.finite(as.matrix(eval))] <- NA   # replaces Inf / -Inf with NA
+  
+  odd_index  <- seq(1, nrow(eval), by = 2)
+  even_index <- seq(2, nrow(eval), by = 2)
+  
+  g0 <- colMeans(eval[odd_index, , drop = FALSE], na.rm = TRUE)
+  g1 <- colMeans(eval[even_index, , drop = FALSE], na.rm = TRUE)
+  
+  tmp <- rbind(g0, g1) %>% as.data.frame()
+  tmp$Group  <- rownames(tmp)
+  tmp$Method <- method
+  rownames(tmp) <- NULL
+  tmp <- tmp[, c("Method", "Group", setdiff(names(tmp), c("Method", "Group")))]
+  
+  model_eval_list[[length(model_eval_list) + 1L]] <- tmp
+}
+
+model_eval <- dplyr::bind_rows(model_eval_list)
+model_eval
+```
+
+
+
+# Scenario 4
+
+```{r}
+result <- readRDS("Data/scenario 5_n=400.rds")
+oracle <- readRDS("Data/scenario 5_oracle.rds")
+
+oracle_est <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  )
+all_lengths <- sapply(result, length)
+
+# 2. Find the indices where the length is not 5
+problem_indices <- which(all_lengths != 5)
+
+# 3. Remove those problematic entries from the result list
+if (length(problem_indices) > 0) {
+  result <- result[-problem_indices]
+}
+```
+
+```{r}
+# Loop over methods =================================
+methods <- names(result[[1]])
+
+results_list <- list()
+
+# Loop over each method to compute bias and MSE
+for (method in methods) {
+  
+  # Create the estimation part (mean)
+  est <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1]))
+                               ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  # Create the variance part (variance)
+  avar <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1]))ll[[method]]$var)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) mean(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "aVar"
+    )
+  
+  evar <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1]))ll[[method]]$est)) %>%
+    group_by(Metric) %>%
+    summarise_all(function(x) var(x, na.rm = TRUE)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "eVar"
+    )
+  
+  # Combine estimation and variance
+  combined <- est %>%
+    left_join(avar, by = c("Metric", "Group")) %>%
+    left_join(evar, by = c("Metric", "Group")) %>%
+    mutate(Method = method)
+  
+  # Calculate the bias and MSE by comparing with oracle
+  combined <- combined %>%
+    left_join(oracle_est %>% select(Metric, Group, Est) %>% rename(Oracle_Est = Est), 
+              by = c("Metric", "Group")) %>%
+    mutate(bias = Est - Oracle_Est, MSE = bias^2 + eVar)
+  
+  # Append to the results list
+  results_list[[method]] <- combined
+}
+
+# Combine all the results into one data frame
+final_results <- bind_rows(results_list)
+
+# Define the methods for comparison, excluding 'oracle' and 'sup'
+methods <- methods[!methods %in% c("oracle", "sup")]
+
+labels <- c("Infairness(S only)","Infairness(S and W)", "Ji et al. (2020)", "Interaction")
+#labels <- methods
+
+# Filter the MSE from sup_est as the baseline
+sup_mse <- final_results %>%
+  filter(Method == "sup") %>%
+  select(Metric, Group, MSE) %>%
+  rename(sup_MSE = MSE)
+
+# Initialize an empty data frame to store RE results
+re_final <- data.frame()
+
+# Loop over each method to compute RE relative to sup_est
+for (i in seq_along(methods)) {
+  
+  # Get the current method and label
+  method <- methods[i]
+  label <- labels[i]
+  
+  # Get MSE of the current method
+  method_mse <- final_results %>%
+    filter(Method == method) %>%
+    select(Metric, Group, MSE)
+  
+  # Compute RE (sup_MSE / method_MSE)
+  re_temp <- sup_mse %>%
+    left_join(method_mse, by = c("Metric", "Group")) %>%
+    mutate(RE = sup_MSE / MSE, 
+           Method = label)  # Apply the label
+  
+  # Append to the re_final data frame
+  re_final <- rbind(re_final, re_temp)
+}
+```
+
+```{r}
+plot_data <- final_results %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  mutate(
+    CI_lower = Est - 1.96 * sqrt(eVar),
+    CI_upper = Est + 1.96 * sqrt(eVar),
+    Metric_num = as.numeric(factor(Metric))  # numeric x for drawing segments
+  ) %>%
+  filter(Method != "oracle") %>%
+  mutate(Method = case_when(
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction",
+    Method == "sup"        ~ "Supervised"
+  )) %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction",
+                                      "Ji et al. (2020)",
+                                      "Supervised")))
+
+oracle_df <- plot_data %>%
+  distinct(Metric, Oracle_Est, Metric_num, Group) %>%
+  mutate(
+    x_start = Metric_num - 0.45,
+    x_end   = Metric_num + 0.45
+  )
+
+ggplot(plot_data, aes(x = factor(Metric_num), y = Est, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Group) +
+  geom_segment(data = oracle_df,
+               aes(x = x_start, xend = x_end,
+                   y = Oracle_Est, yend = Oracle_Est),
+               inherit.aes = FALSE,
+               color = "black") +
+  scale_x_discrete(
+    labels = parse(text = oracle_df[oracle_df$Group == "Delta",]$Metric)) +
+  ylab("Estimated Value") +
+  xlab("") +
+  ggsci::scale_color_nejm() +
+  theme_bw() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper),
+                position = position_dodge2(width = 1)) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+re_final %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  filter(!Method == "Ji et al. (2020)") %>%
+  mutate(Method = factor(Method, levels = c("Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction"))) %>%
+  ggplot(aes(x = Metric, y = RE, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge2()) +
+  theme_bw() +
+  facet_wrap(~Group) +
+  geom_abline(intercept = 1, slope = 0, linetype = "dashed", col = "red") +
+  ylab("Relative Efficiency") +
+  xlab("") +
+  scale_x_discrete(labels = scales::parse_format()) +
+  ggsci::scale_fill_nejm() +
+  theme(legend.position = "bottom")
+```
+
+```{r, fig.width = 12, fig.height = 6}
+oracle_df <- oracle$est %>%
+  pivot_longer(
+    cols = -c(Metric),
+    names_to = "Group",
+    values_to = "Est"
+  ) %>%
+  data.frame()
+
+coverage_result <- c()
+methods <- c("sup", "ss_s", "ss_sw", "ss_Beta", "ss_sw_int")
+
+for (method in methods) {
+  
+  est <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$est)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Est"
+    )
+  
+  var <- do.call(rbind, lapply(result, function(ll) if (!is.na(ll[[method]][1])) ll[[method]]$var)) %>%
+    pivot_longer(
+      cols = -c(Metric),
+      names_to = "Group",
+      values_to = "Var"
+    )
+  
+  for(m in unique(est$Metric)){
+    for(g in unique(est$Group)){
+      est_temp <- est %>% filter(Metric == m, Group == g) %>% pull(Est)
+      var_temp <- var %>% filter(Metric == m, Group == g) %>% pull(Var)
+      
+      coverage <- sum((est_temp - qnorm(0.975) * sqrt(var_temp) <= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"])) &
+                        (est_temp + qnorm(0.975) * sqrt(var_temp) >= as.numeric(oracle_df [oracle_df $Metric == m & oracle_df $Group == g, "Est"]))) / length(est_temp)
+      
+      coverage_result <- rbind(coverage_result, data.frame(Method = method, Metric = m, Group = g, Coverage = coverage))
+    }
+  }
+  
+}
+
+coverage_result %>%
+  mutate(Method = case_when(
+    Method == "sup"        ~ "Supervised",
+    Method == "ss_s"       ~ "Infairness(S only)",
+    Method == "ss_sw"      ~ "Infairness(S and W)",
+    Method == "ss_Beta"    ~ "Ji et al. (2020)",
+    Method == "ss_sw_int"  ~ "Interaction"
+  )) %>%
+  mutate(Method = factor(Method, levels = c(
+                                      "Infairness(S only)",
+                                      "Infairness(S and W)",
+                                      "Interaction",
+                                      "Ji et al. (2020)",
+                                      "Supervised"))) %>%
+  ggplot(aes(x = Group, y = Coverage, color = Method)) +
+  geom_point(position = position_dodge2(width = 1), size = 2) +
+  facet_wrap(~Metric) +
+  ylab("Coverage Probability") +
+  xlab("") +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  ggsci::scale_color_nejm()
+```
+
+```{r}
+# percentage bias
+final_results %>%
+  filter(!Metric %in% c("TNR", "FNR")) %>%
+  mutate(Percent_Bias = (bias / Oracle_Est) * 100) %>%
+  ggplot(aes(x = Metric, y = Percent_Bias, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge2()) +
+  theme_bw() +
+  facet_wrap(~Group) +
+  geom_hline(yintercept = 0, linetype = "dashed", col = "red") +
+  ylab("Percentage Bias (%)") +
+  xlab("") +
+  scale_x_discrete(labels = scales::parse_format()) +
+  ggsci::scale_fill_nejm() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+
+model_eval_list <- list()
+
+for (method in methods) {
+  eval <- do.call(rbind, lapply(result, function(ll) {
+    if (!is.null(ll[[method]]) && !is.na(ll[[method]][1])) ll[[method]]$imp_quality else NULL
+  })) %>%
+    as.data.frame()
+  
+  if (nrow(eval) == 0L) next
+  
+  # --- Exclude Inf values ---
+  eval[!is.finite(as.matrix(eval))] <- NA   # replaces Inf / -Inf with NA
+  
+  odd_index  <- seq(1, nrow(eval), by = 2)
+  even_index <- seq(2, nrow(eval), by = 2)
+  
+  g0 <- colMeans(eval[odd_index, , drop = FALSE], na.rm = TRUE)
+  g1 <- colMeans(eval[even_index, , drop = FALSE], na.rm = TRUE)
+  
+  tmp <- rbind(g0, g1) %>% as.data.frame()
+  tmp$Group  <- rownames(tmp)
+  tmp$Method <- method
+  rownames(tmp) <- NULL
+  tmp <- tmp[, c("Method", "Group", setdiff(names(tmp), c("Method", "Group")))]
+  
+  model_eval_list[[length(model_eval_list) + 1L]] <- tmp
+}
+
+model_eval <- dplyr::bind_rows(model_eval_list)
+model_eval
+```
